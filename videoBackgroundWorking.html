@@ -1,0 +1,191 @@
+<html>
+  <head>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.7.0/dist/tf.min.js"></script>
+    <script>
+      async function main() {
+        const height = 480;
+        const width = 640;
+        const video = document.querySelector("video");
+        const canvas1 = document.createElement("canvas");
+        const context1 = canvas1.getContext("2d");
+        const body = document.querySelector(".body");
+        const outPutVideo = document.createElement("video");
+        const backgroundVideo = document.createElement("video");
+        backgroundVideo.width = width;
+        backgroundVideo.height = height;
+        outPutVideo.width = width;
+        outPutVideo.height = height;
+        video.width = width;
+        video.height = height;
+        canvas1.width = width;
+        canvas1.height = height;
+        canvas1.style.marginLeft = "50px";
+        canvas1.style.border = "1px solid black";
+        const url =
+          "https://images.unsplash.com/photo-1682686580003-22d3d65399a8?auto=format&fit=crop&q=80&w=1931&ixlib=rb-4.0.3&ixid=M3wxMjA3fDF8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D";
+
+        const backgroundImage = new Image();
+
+        backgroundImage.src = url;
+        backgroundImage.style.objectFit = "scale-down";
+
+        backgroundImage.crossOrigin = "anonymous";
+        backgroundImage.height = height;
+        backgroundImage.width = width;
+
+        backgroundVideo.src = "backgroundVideo.mp4";
+        backgroundVideo.crossOrigin = "anonymous";
+        backgroundVideo.autoplay = true;
+        backgroundVideo.loop = true;
+        backgroundVideo.muted = true;
+
+        console.log("backgroundVideo", backgroundVideo);
+        video.style.display = "none";
+        const model = await tf.loadGraphModel("./model/model.json");
+
+        let [r1i, r2i, r3i, r4i] = [
+          tf.tensor(0),
+          tf.tensor(0),
+          tf.tensor(0),
+          tf.tensor(0),
+        ];
+        const downsample_ratio = tf.tensor(0.5);
+        body.appendChild(canvas1);
+        // canvas1.style.display = "none"
+        body.appendChild(outPutVideo);
+        // let backgroundVideo = await loadBackgroundVideo(backgroundVideo);
+        console.log('backgroundVideo--',backgroundVideo);
+        backgroundVideo.onplay = async () => {
+        console.log("play event", backgroundVideo);
+
+        const webcam = await tf.data.webcam(video);
+        function createCanvasStream() {
+          const canvasStream = canvas1.captureStream();
+          return new MediaStream([canvasStream.getTracks()[0]]);
+        }
+
+        function setVideoSource() {
+          const canvasStream = createCanvasStream();
+          console.log(canvasStream.getTracks());
+          outPutVideo.srcObject = canvasStream;
+        }
+        setVideoSource();
+
+        function drawVideo() {
+          console.log(
+            "in draww--",
+            backgroundVideo?.paused ,backgroundVideo?.ended
+          );
+          if (!backgroundVideo?.paused && !backgroundVideo?.ended) {
+            context1.drawImage(
+                backgroundVideo,
+              0,
+              0,
+              backgroundVideo.width,
+              backgroundVideo.height
+            );
+            requestAnimationFrame(drawVideo);
+          }
+        }
+
+        // const segImageObj = new Image();
+        // segImageObj.style.background = "transparent";
+
+        // const foreGroundImageObj = new Image()
+        // foreGroundImageObj.style.background = "transparent"
+
+        while (true) {
+          console.log('segmentation happening---');
+           tf.nextFrame();
+
+          const img = await webcam.capture();
+          const src = tf.tidy(() => img.expandDims(0).div(255));
+          const [fgr, pha, r1o, r2o, r3o, r4o] = await model.executeAsync(
+            { src, r1i, r2i, r3i, r4i, downsample_ratio },
+            ["fgr", "pha", "r1o", "r2o", "r3o", "r4o"]
+          );
+          const segmentationMask = await getSegment({ pha: pha.clone() });
+          const foreGroundMask = await getForeGround({ fgr: fgr.clone() });
+          const segImage = createImageElementFromImageData(segmentationMask);
+          const foreGroundImage =
+            createImageElementFromImageData(foreGroundMask);
+          segImage.onload = () => {
+            // context1.save();
+            // context1.clearRect(0, 0, width, height);
+            context1.drawImage(segImage, 0, 0, width, height);
+            context1.globalCompositeOperation = "source-out";
+            // context1.fillStyle = backgroundPattern;
+            foreGroundImage.onload = () => {
+              drawVideo();
+              // context1.fillRect(0, 0, width, height);
+              // context1.drawImage(backgroundVideo, 0, 0, width, height);
+              //  over lay image
+              context1.globalCompositeOperation = "destination-atop";
+              context1.filter = "none";
+              context1.drawImage(foreGroundImage, 0, 0, width, height);
+              context1.restore();
+            };
+          };
+
+          tf.dispose([img, src, fgr, pha, r1i, r2i, r3i, r4i]);
+          [r1i, r2i, r3i, r4i] = [r1o, r2o, r3o, r4o];
+        }
+        return;
+        };
+
+        backgroundVideo.play();
+      }
+      
+      function createImageElementFromImageData(imageData) {
+        const canvas = document.createElement("canvas");
+        canvas.width = imageData.width;
+        canvas.height = imageData.height;
+        const ctx = canvas.getContext("2d");
+        ctx.putImageData(imageData, 0, 0);
+
+        const image = new Image();
+        image.style.background = "transparent";
+        image.height = imageData.height;
+        image.width = imageData.width;
+        image.src = canvas.toDataURL();
+        return image;
+      }
+
+      async function getSegment({ pha }) {
+        const rgba = tf.tidy(() => {
+          const rgb = tf.fill([pha.shape[1], pha.shape[2], 3], 255, "int32");
+          const a = pha.squeeze(0).mul(255).cast("int32");
+          return tf.concat([rgb, a], -1);
+        });
+        pha && pha.dispose();
+        const [height, width] = rgba.shape.slice(0, 2);
+        const pixelData = new Uint8ClampedArray(await rgba.data());
+        const imageData = new ImageData(pixelData, width, height);
+        rgba.dispose();
+        return imageData;
+      }
+
+      async function getForeGround({ fgr }) {
+        const rgba = tf.tidy(() => {
+          const rgb = fgr.squeeze(0).mul(255).cast("int32");
+          const a = tf.fill([fgr.shape[1], fgr.shape[2], 1], 255, "int32");
+          return tf.concat([rgb, a], -1);
+        });
+        fgr && fgr.dispose();
+        const [height, width] = rgba.shape.slice(0, 2);
+        const pixelData = new Uint8ClampedArray(await rgba.data());
+        const imageData = new ImageData(pixelData, width, height);
+        rgba.dispose();
+        return imageData;
+      }
+
+      window.addEventListener("load", main);
+    </script>
+  </head>
+
+  <body>
+    <div class="body">
+      <video></video>
+    </div>
+  </body>
+</html>
